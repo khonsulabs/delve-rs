@@ -33,11 +33,11 @@ pub async fn import_continuously(database: Database, cache: Cache) -> anyhow::Re
                 tx.operations.push(operation);
                 if tx.operations.len() >= 100_000 {
                     let new_count = op_count + tx.operations.len();
+                    uncompacted_operations += tx.operations.len();
                     println!("Committing {op_count}:{new_count} changes");
                     tx.apply(&database)?;
                     tx = Transaction::new();
                     op_count = new_count;
-                    uncompacted_operations += op_count;
                 }
 
                 if uncompacted_operations > 2_000_000 {
@@ -49,10 +49,10 @@ pub async fn import_continuously(database: Database, cache: Cache) -> anyhow::Re
 
             if !tx.operations.is_empty() {
                 let new_count = op_count + tx.operations.len();
+                uncompacted_operations += tx.operations.len();
                 println!("Committing {op_count}:{new_count} changes");
                 tx.apply(&database)?;
                 op_count = new_count;
-                uncompacted_operations += op_count;
             }
 
             importer.await??;

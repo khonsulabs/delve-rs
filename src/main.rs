@@ -158,7 +158,7 @@ fn query(query: &str, db: &Database, cache: &Cache) -> anyhow::Result<Vec<CrateR
 
     let mut final_results = Vec::with_capacity(results.len());
     for (confidence, popularity, id) in results {
-        let c = all_crates.remove(&id).expect("missing crate from query");
+        let Some(c) = all_crates.remove(&id) else { continue };
         final_results.push(CrateResult {
             confidence,
             popularity,
