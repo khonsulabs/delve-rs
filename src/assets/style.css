@@ -1,0 +1,31 @@
+:root {
+    --bg: #301800;
+    --fg: #FFF0DD;
+    --link: hsl(228, 63%, 85%);
+    --link-visited: hsl(228, 50%, 70%);
+    --link-active: hsl(228, 63%, 90%);
+}
+
+body {
+    background-color: var(--bg);
+    margin: 0;
+    padding: 10px;
+    color: var(--fg);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+a:active {
+    color: var(--link-active);
+}
+
+a:visited {
+    color: var(--link-visited);
+}

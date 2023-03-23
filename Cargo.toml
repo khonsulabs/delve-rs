@@ -1,0 +1,29 @@
+[package]
+name = "crate-index"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+time = { version = "0.3.20" }
+bonsaidb = { git = "https://github.com/khonsulabs/bonsaidb", branch = "main", features = [
+    "local",
+] }
+reqwest = { version = "0.11.14", features = ["rustls-tls-webpki-roots"] }
+anyhow = { version = "1.0.69", features = ["backtrace"] }
+tokio = { version = "1.26.0", features = [
+    "rt-multi-thread",
+    "fs",
+    "process",
+    "macros",
+] }
+csv = "1.2.1"
+serde = { version = "1.0.150", features = ["derive"] }
+axum = { version = "0.6.12", features = ["http2"] }
+serde_urlencoded = "0.7.1"
+flume = "0.10.14"
+askama = "0.12.0"
+
+[patch."https://github.com/khonsulabs/bonsaidb"]
+bonsaidb = { path = "../bonsaidb/crates/bonsaidb" }

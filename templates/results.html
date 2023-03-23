@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}
+"{{ query }}": delve.rs
+{% endblock %}
+
+{% block content %}
+<main>
+    <h1>Results for {{ query }}</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Crate</th>
+                <th>Confidence</th>
+                <th>Popularity</th>
+            </tr>
+        </thead>
+
+        {% for row in results %}
+        <tr>
+            <td><a href="https://crates.io/crates/{{row.result.name}}">{{row.result.name}}</a></td>
+            <td>{{ row.confidence }}</td>
+            <td>{{ row.popularity }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</main>
+{% endblock %}
