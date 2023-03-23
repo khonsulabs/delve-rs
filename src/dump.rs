@@ -41,6 +41,8 @@ pub async fn import_continuously(database: Database, cache: Cache) -> anyhow::Re
                 }
 
                 if uncompacted_operations > 2_000_000 {
+                    // Load new data into the cache during a long import.
+                    cache.refresh()?;
                     // Keep disk space down by compacting frequently.
                     database.compact()?;
                     uncompacted_operations = 0;
