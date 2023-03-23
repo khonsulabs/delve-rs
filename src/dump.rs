@@ -28,6 +28,7 @@ pub async fn import_continuously(database: Database, cache: Cache) -> anyhow::Re
 
             let mut tx = Transaction::new();
             let mut op_count = 0;
+            let mut uncompacted_operations = 0;
             while let Ok(operation) = receiver.recv() {
                 tx.operations.push(operation);
                 if tx.operations.len() >= 100_000 {
@@ -36,6 +37,13 @@ pub async fn import_continuously(database: Database, cache: Cache) -> anyhow::Re
                     tx.apply(&database)?;
                     tx = Transaction::new();
                     op_count = new_count;
+                    uncompacted_operations += op_count;
+                }
+
+                if uncompacted_operations > 2_000_000 {
+                    // Keep disk space down by compacting frequently.
+                    database.compact()?;
+                    uncompacted_operations = 0;
                 }
             }
 
@@ -44,12 +52,13 @@ pub async fn import_continuously(database: Database, cache: Cache) -> anyhow::Re
                 println!("Committing {op_count}:{new_count} changes");
                 tx.apply(&database)?;
                 op_count = new_count;
+                uncompacted_operations += op_count;
             }
 
             importer.await??;
 
             // This cleans up the database once per day-ish.
-            if op_count > 0 {
+            if op_count > 0 && uncompacted_operations > 0 {
                 println!("Compacting.");
                 database.compact()?;
             }
