@@ -61,9 +61,10 @@ struct Data {
 
 impl Data {
     fn refresh_crates(&self) -> anyhow::Result<()> {
+        let crates_by_name = CratesByNormalizedName::entries(&self.database).query()?;
         let recent_downloads_start =
             time::OffsetDateTime::now_utc().date() - time::Duration::days(30);
-        let mut recent_downloads_by_crate = HashMap::new();
+        let mut recent_downloads_by_crate = HashMap::with_capacity(crates_by_name.len());
         for mapping in DownloadsByDate::entries(&self.database)
             .with_key_range((CalendarDate::from(recent_downloads_start), 0)..)
             .reduce_grouped()?
@@ -74,12 +75,11 @@ impl Data {
             *crate_downloads += mapping.value;
         }
 
-        let (crates, crates_by_name) = CratesByNormalizedName::entries(&self.database)
-            .query()?
+        let (crates, crates_by_name) = crates_by_name
             .into_iter()
             .map(|mapping| {
                 let id = mapping.source.id.deserialize().expect("invalid id");
-                let recent_downloads = recent_downloads_by_crate.remove(&id).unwrap_or(0);
+                let recent_downloads = recent_downloads_by_crate.get(&id).copied().unwrap_or(0);
                 (
                     (
                         id,
@@ -99,7 +99,6 @@ impl Data {
             .write()
             .map_err(|_| anyhow::anyhow!("crates rwlock poisoned"))?;
         *cached_crates = crates;
-
         drop(cached_crates);
 
         let mut cached_crates = self

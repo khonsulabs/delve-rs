@@ -38,16 +38,18 @@ pub async fn import_continuously(database: Database, cache: Cache) -> anyhow::Re
                     tx.apply(&database)?;
                     tx = Transaction::new();
                     op_count = new_count;
+
+                    // Load new data into the cache during a long import.
+                    cache.refresh()?;
                 }
 
                 if uncompacted_operations > 2_000_000 {
-                    // Load new data into the cache during a long import.
-                    cache.refresh()?;
                     // Keep disk space down by compacting frequently.
                     database.compact()?;
                     uncompacted_operations = 0;
                 }
             }
+            drop(receiver);
 
             if !tx.operations.is_empty() {
                 let new_count = op_count + tx.operations.len();
@@ -55,6 +57,7 @@ pub async fn import_continuously(database: Database, cache: Cache) -> anyhow::Re
                 println!("Committing {op_count}:{new_count} changes");
                 tx.apply(&database)?;
                 op_count = new_count;
+                cache.refresh()?;
             }
 
             importer.await??;
@@ -66,8 +69,6 @@ pub async fn import_continuously(database: Database, cache: Cache) -> anyhow::Re
             }
 
             println!("Done importing.");
-
-            cache.refresh()?;
         } else {
             println!("No new data dumps are available.");
         }
