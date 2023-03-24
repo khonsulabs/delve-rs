@@ -189,13 +189,13 @@ impl<'a> QueryScore<'a> {
                 .iter()
                 .map(TextScore::calculated_score)
                 .sum::<f32>()
-                * 10.)
+                * 50.)
             + self
                 .category
                 .iter()
                 .map(TextScore::calculated_score)
                 .sum::<f32>()
-                * 25.
+                * 50.
     }
 }
 
@@ -210,28 +210,42 @@ enum TextScore {
 impl TextScore {
     pub fn score(needle: &str, haystack: &str) -> Option<Self> {
         let same_length = needle.len() == haystack.len();
-        let match_percent = needle.len() as f32 / haystack.len() as f32;
-        haystack.find(needle).map(|offset| {
-            if offset == 0 {
-                if same_length {
-                    Self::ExactMatch
-                } else {
-                    Self::StartsWith { match_percent }
-                }
-            } else if offset == haystack.len() - needle.len() {
-                Self::EndsWith { match_percent }
+        haystack
+            .find(needle)
+            .map(|offset| Self::score_offset(offset, same_length, haystack.len(), needle.len()))
+            .or_else(|| {
+                needle.find(haystack).map(|offset| {
+                    Self::score_offset(offset, same_length, needle.len(), haystack.len())
+                })
+            })
+    }
+
+    fn score_offset(
+        offset: usize,
+        same_length: bool,
+        haystack_len: usize,
+        needle_len: usize,
+    ) -> Self {
+        let match_percent = needle_len as f32 / haystack_len as f32;
+        if offset == 0 {
+            if same_length {
+                Self::ExactMatch
             } else {
-                Self::Contains { match_percent }
+                Self::StartsWith { match_percent }
             }
-        })
+        } else if offset == haystack_len - needle_len {
+            Self::EndsWith { match_percent }
+        } else {
+            Self::Contains { match_percent }
+        }
     }
 
     fn calculated_score(&self) -> f32 {
         match self {
             TextScore::ExactMatch => 100.,
-            TextScore::StartsWith { match_percent } => 25. * match_percent,
-            TextScore::EndsWith { match_percent } => 25. * match_percent,
-            TextScore::Contains { match_percent } => *match_percent,
+            TextScore::StartsWith { match_percent } => 10. * match_percent * match_percent,
+            TextScore::EndsWith { match_percent } => 10. * match_percent * match_percent,
+            TextScore::Contains { match_percent } => *match_percent * *match_percent,
         }
     }
 }
