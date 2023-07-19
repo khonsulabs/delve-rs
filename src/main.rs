@@ -1,11 +1,23 @@
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::{
+    borrow::Cow,
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
-use bonsaidb::core::connection::StorageConnection;
-use bonsaidb::core::schema::SerializedView;
-use bonsaidb::local::config::{Builder, StorageConfiguration};
-use bonsaidb::local::{Database, Storage};
+use bonsaidb::{
+    core::{connection::StorageConnection, key::Key, schema::SerializedView},
+    local::{
+        config::{Builder, StorageConfiguration},
+        Database, Storage,
+    },
+};
+use tantivy::{
+    collector::TopDocs,
+    query::QueryParser,
+    schema::{Field, Schema, Value, FAST, INDEXED, STORED, TEXT},
+    Index,
+};
 
 use crate::cache::{Cache, CachedCrate};
 
@@ -24,18 +36,48 @@ async fn main() -> anyhow::Result<()> {
     let db = storage.create_database::<schema::CrateIndex>("delve", true)?;
     let cache = Cache::new(db.clone())?;
 
-    if std::env::args().len() <= 1 {
-        tokio::spawn(dump::import_continuously(db.clone(), cache.clone()));
+    let mut search_schema = tantivy::schema::Schema::builder();
+    let id = search_schema.add_u64_field("id", INDEXED | STORED);
+    let name = search_schema.add_text_field("name", TEXT);
+    let description = search_schema.add_text_field("description", TEXT);
+    let readme = search_schema.add_text_field("readme", TEXT);
+    let search_schema = search_schema.build();
 
-        webserver::run(db, cache).await?;
+    std::fs::create_dir("delve-rs.bonsaidb/tantivy")?;
+    let index = SearchIndex {
+        index: Index::create_in_dir("delve-rs.bonsaidb/tantivy", search_schema.clone())?,
+        id,
+        name,
+        description,
+        readme,
+    };
+
+    if std::env::args().len() <= 1 {
+        dump::import_continuously(db, cache, index).await?;
+        println!("About to exit.");
+        // webserver::run(db, cache, index).await?;
     } else {
         let q = std::env::args().nth(1).expect("length checked");
         let start = Instant::now();
-        query(&q, &db, &cache)?;
+        query(&q, &db, &cache, &index)?;
         println!("Query executed in {}us", start.elapsed().as_micros());
     }
 
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct SearchIndex {
+    pub index: Index,
+    pub id: Field,
+    pub name: Field,
+    pub description: Field,
+    pub readme: Field,
+}
+
+#[derive(Key, Debug, Clone)]
+struct Foo<'k> {
+    string: Cow<'k, str>,
 }
 
 #[derive(Debug)]
@@ -45,7 +87,12 @@ struct CrateResult {
     result: CachedCrate,
 }
 
-fn query(query: &str, db: &Database, cache: &Cache) -> anyhow::Result<Vec<CrateResult>> {
+fn query(
+    query: &str,
+    db: &Database,
+    cache: &Cache,
+    index: &SearchIndex,
+) -> anyhow::Result<Vec<CrateResult>> {
     let mut crate_scores = HashMap::new();
 
     let mut total_words = 0;
@@ -90,11 +137,41 @@ fn query(query: &str, db: &Database, cache: &Cache) -> anyhow::Result<Vec<CrateR
         }
     }
 
+    // Search for crates that contain this word in their description/readme
+    let search_index = index.index.reader()?;
+    let searcher = search_index.searcher();
+    let query_parser = QueryParser::for_index(
+        &index.index,
+        vec![index.name, index.description, index.readme],
+    );
+    if let Ok(query) = query_parser.parse_query(query) {
+        for (search_score, doc) in search_index
+            .searcher()
+            .search(&query, &TopDocs::with_limit(1_000))?
+        {
+            if let Ok(doc) = searcher.doc(doc) {
+                if let Some(Value::U64(crate_id)) = doc.get_first(index.id) {
+                    let score = crate_scores
+                        .entry(*crate_id)
+                        .or_insert_with(QueryScore::default);
+                    score.index_score = Some(search_score);
+                }
+            }
+        }
+    }
+    // for mapping in schema::CratesByWord::entries(db).with_key(word).query()? {
+    //     let score = crate_scores
+    //         .entry(mapping.source.id.deserialize::<u64>()?)
+    //         .or_insert_with(QueryScore::default);
+    //     score.word_locations += mapping.value;
+    //     score.matched_words.insert(word);
+    // }
+
     // Sort the result set and get rid of everything that didn't match all
     // search terms.
     let mut results = Vec::<(f32, f32, u64)>::with_capacity(crate_scores.len().max(1000));
     for (id, score) in &crate_scores {
-        if score.matched_words.len() == total_words {
+        if score.matched_words.len() == total_words || score.index_score.is_some() {
             let calculated = score.calculated_score();
             let insert_at =
                 match results.binary_search_by(|(ascore, _, _)| calculated.total_cmp(ascore)) {
@@ -103,7 +180,9 @@ fn query(query: &str, db: &Database, cache: &Cache) -> anyhow::Result<Vec<CrateR
                 };
             if insert_at < 1000 {
                 results.insert(insert_at, (calculated, 0.0, *id));
-                results.truncate(1000);
+                if results.len() > 1000 {
+                    results.truncate(1000);
+                }
             }
         }
     }
@@ -172,6 +251,7 @@ fn query(query: &str, db: &Database, cache: &Cache) -> anyhow::Result<Vec<CrateR
 #[derive(Default, Debug)]
 struct QueryScore<'a> {
     matched_words: HashSet<&'a str>,
+    index_score: Option<f32>,
     name: Vec<TextScore>,
     keywords: Vec<TextScore>,
     category: Vec<TextScore>,
@@ -179,23 +259,25 @@ struct QueryScore<'a> {
 
 impl<'a> QueryScore<'a> {
     fn calculated_score(&self) -> f32 {
-        self.name
-            .iter()
-            .map(TextScore::calculated_score)
-            .sum::<f32>()
-            * 100.
-            + (self
-                .keywords
-                .iter()
-                .map(TextScore::calculated_score)
-                .sum::<f32>()
-                * 50.)
-            + self
-                .category
-                .iter()
-                .map(TextScore::calculated_score)
-                .sum::<f32>()
-                * 50.
+        // self.name
+        //     .iter()
+        //     .map(TextScore::calculated_score)
+        //     .sum::<f32>()
+        //     * 100.
+        //     + (self
+        //         .keywords
+        //         .iter()
+        //         .map(TextScore::calculated_score)
+        //         .sum::<f32>()
+        //         * 50.)
+        //     + self
+        //         .category
+        //         .iter()
+        //         .map(TextScore::calculated_score)
+        //         .sum::<f32>()
+        //         * 50.
+        //     +
+        self.index_score.unwrap_or(0.)
     }
 }
 

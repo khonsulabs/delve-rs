@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard, Weak};
 
 use bonsaidb::core::schema::SerializedView;
@@ -85,7 +85,9 @@ impl Data {
                         id,
                         CachedCrate {
                             name: mapping.value.name,
+                            description: mapping.value.description,
                             downloads: mapping.value.downloads,
+                            keywords: mapping.value.keywords,
                             recent_downloads,
                         },
                     ),
@@ -115,6 +117,8 @@ impl Data {
 #[derive(Debug, Clone)]
 pub struct CachedCrate {
     pub name: String,
+    pub description: String,
+    pub keywords: HashSet<u64>,
     pub downloads: u64,
     pub recent_downloads: u64,
 }

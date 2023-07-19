@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::iter::{Peekable, Sum};
+use std::ops::AddAssign;
+use std::str::Chars;
 
 use bonsaidb::core::connection::RangeRef;
 use bonsaidb::core::document::{CollectionDocument, Emit};
@@ -75,6 +78,8 @@ impl CollectionViewSchema for CratesByNormalizedName {
             Crate::normalized_name(&document.contents.name),
             CrateInfo {
                 name: document.contents.name,
+                description: document.contents.description,
+                keywords: document.contents.keywords,
                 downloads: document.contents.downloads.unwrap_or(0),
             },
         )
@@ -85,6 +90,8 @@ impl CollectionViewSchema for CratesByNormalizedName {
 pub struct CrateInfo {
     pub name: String,
     pub downloads: u64,
+    pub description: String,
+    pub keywords: HashSet<u64>,
 }
 
 #[derive(View, Clone, Debug)]

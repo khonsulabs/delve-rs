@@ -1,16 +1,21 @@
 use askama::Template;
-use axum::extract::{RawQuery, State};
-use axum::http::header::CONTENT_TYPE;
-use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::{
+    extract::{RawQuery, State},
+    http::header::CONTENT_TYPE,
+    response::{Html, IntoResponse, Response},
+    routing::get,
+};
 use bonsaidb::local::Database;
 
 use serde::Deserialize;
 
-use crate::cache::Cache;
-use crate::CrateResult;
+use crate::{cache::Cache, CrateResult, SearchIndex};
 
-pub async fn run(database: Database, cache: Cache) -> anyhow::Result<()> {
+pub(super) async fn run(
+    database: Database,
+    cache: Cache,
+    search_index: SearchIndex,
+) -> anyhow::Result<()> {
     // build our application with a single route
     let app = axum::Router::new()
         .route("/about", get(|| async { "Hello, World!" }))
@@ -28,7 +33,10 @@ pub async fn run(database: Database, cache: Cache) -> anyhow::Result<()> {
 
     // run it with hyper on localhost:3000
     axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-        .serve(app.with_state((database, cache)).into_make_service())
+        .serve(
+            app.with_state((database, cache, search_index))
+                .into_make_service(),
+        )
         .await?;
 
     Ok(())
@@ -40,12 +48,12 @@ struct Query {
 }
 
 async fn index(
-    State((db, cache)): State<(Database, Cache)>,
+    State((db, cache, search_index)): State<(Database, Cache, SearchIndex)>,
     RawQuery(query): RawQuery,
 ) -> Response {
     if let Some(query) = query {
         let query = serde_urlencoded::from_str(&query).unwrap_or(Query { q: query });
-        let results = super::query(&query.q, &db, &cache).unwrap();
+        let results = super::query(&query.q, &db, &cache, &search_index).unwrap();
         Html(
             SearchResults {
                 query: query.q,

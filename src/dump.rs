@@ -1,80 +1,96 @@
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
-use bonsaidb::core::connection::Connection;
-use bonsaidb::core::schema::SerializedCollection;
-use bonsaidb::core::transaction::{Operation, Transaction};
-use bonsaidb::local::Database;
+use bonsaidb::{
+    core::{
+        connection::Connection,
+        schema::SerializedCollection,
+        transaction::{Operation, Transaction},
+    },
+    local::Database,
+};
 use reqwest::header::LAST_MODIFIED;
 use serde::Deserialize;
+use tantivy::{doc, IndexWriter, Term};
 use time::{Date, Duration, Month, OffsetDateTime, PrimitiveDateTime, Time};
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::{io::AsyncWriteExt, process::Command};
 
-use crate::cache::Cache;
-use crate::schema::{self, CalendarDate, ImportState, OwnerId, VersionDownloadKey};
+use crate::{
+    cache::Cache,
+    schema::{self, CalendarDate, ImportState, OwnerId, VersionDownloadKey},
+    SearchIndex,
+};
 
 // TODO this reference to cache means it won't ever drop because this task never exits.
-pub async fn import_continuously(database: Database, cache: Cache) -> anyhow::Result<()> {
-    loop {
-        if let Some(latest_dump) = download_new_dump(&database).await? {
-            let (sender, receiver) = std::sync::mpsc::sync_channel(100_000);
+pub(super) async fn import_continuously(
+    database: Database,
+    cache: Cache,
+    index: SearchIndex,
+) -> anyhow::Result<()> {
+    // loop {
+    if let Some(latest_dump) = download_new_dump(&database).await? {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(100_000);
 
-            let importer = tokio::task::spawn_blocking({
-                let database = database.clone();
+        let index_writer = index.index.writer(4 * 1024 * 1024)?;
+        let importer = tokio::task::spawn_blocking({
+            let database = database.clone();
+            let index = index.clone();
 
-                move || import_dump(latest_dump, &database, sender)
-            });
+            move || import_dump(latest_dump, &database, sender, index_writer, index)
+        });
 
-            let mut tx = Transaction::new();
-            let mut op_count = 0;
-            let mut uncompacted_operations = 0;
-            while let Ok(operation) = receiver.recv() {
-                tx.operations.push(operation);
-                if tx.operations.len() >= 100_000 {
-                    let new_count = op_count + tx.operations.len();
-                    uncompacted_operations += tx.operations.len();
-                    println!("Committing {op_count}:{new_count} changes");
-                    tx.apply(&database)?;
-                    tx = Transaction::new();
-                    op_count = new_count;
-
-                    // Load new data into the cache during a long import.
-                    cache.refresh()?;
-                }
-
-                if uncompacted_operations > 2_000_000 {
-                    // Keep disk space down by compacting frequently.
-                    database.compact()?;
-                    uncompacted_operations = 0;
-                }
-            }
-            drop(receiver);
-
-            if !tx.operations.is_empty() {
+        let mut tx = Transaction::new();
+        let mut op_count = 0;
+        let mut uncompacted_operations = 0;
+        while let Ok(operation) = receiver.recv() {
+            tx.operations.push(operation);
+            if tx.operations.len() >= 100_000 {
                 let new_count = op_count + tx.operations.len();
                 uncompacted_operations += tx.operations.len();
                 println!("Committing {op_count}:{new_count} changes");
                 tx.apply(&database)?;
+                tx = Transaction::new();
                 op_count = new_count;
+
+                // Load new data into the cache during a long import.
                 cache.refresh()?;
             }
 
-            importer.await??;
-
-            // This cleans up the database once per day-ish.
-            if op_count > 0 && uncompacted_operations > 0 {
-                println!("Compacting.");
+            if uncompacted_operations > 2_000_000 {
+                // Keep disk space down by compacting frequently.
                 database.compact()?;
+                uncompacted_operations = 0;
             }
-
-            println!("Done importing.");
-        } else {
-            println!("No new data dumps are available.");
         }
-        // Check for new dumps every hour.
-        tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+        drop(receiver);
+
+        if !tx.operations.is_empty() {
+            let new_count = op_count + tx.operations.len();
+            uncompacted_operations += tx.operations.len();
+            println!("Committing {op_count}:{new_count} changes");
+            tx.apply(&database)?;
+            op_count = new_count;
+            cache.refresh()?;
+        }
+
+        importer.await??;
+
+        // This cleans up the database once per day-ish.
+        if op_count > 0 && uncompacted_operations > 0 {
+            println!("Compacting.");
+            database.compact()?;
+        }
+
+        println!("Done importing.");
+    } else {
+        println!("No new data dumps are available.");
     }
+    //     // Check for new dumps every hour.
+    //     tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+    // }
+    Ok(())
 }
 
 async fn download(client: reqwest::Client) -> anyhow::Result<(String, String)> {
@@ -207,17 +223,19 @@ fn import_dump(
     dump_date: String,
     db: &Database,
     tx_sender: std::sync::mpsc::SyncSender<Operation>,
+    index_writer: IndexWriter,
+    index: SearchIndex,
 ) -> anyhow::Result<()> {
     let path = Path::new(&dump_date);
     let data_folder = path.join("data");
 
     // Now we can import the crates structure.
 
-    apply_crate_changes(&data_folder, &tx_sender, db)?;
-    apply_keyword_changes(&data_folder, &tx_sender, db)?;
-    apply_category_changes(&data_folder, &tx_sender, db)?;
-    let version_crates = apply_version_changes(&data_folder, &tx_sender, db)?;
-    apply_version_download_changes(&data_folder, &tx_sender, db, &version_crates)?;
+    apply_crate_changes(&data_folder, &tx_sender, db, index_writer, index)?;
+    // apply_keyword_changes(&data_folder, &tx_sender, db)?;
+    // apply_category_changes(&data_folder, &tx_sender, db)?;
+    // let version_crates = apply_version_changes(&data_folder, &tx_sender, db)?;
+    // apply_version_download_changes(&data_folder, &tx_sender, db, &version_crates)?;
 
     let mut state = ImportState::get(&(), db)?.expect("downloading inserts state");
     state.contents.last_dump_imported = Some(dump_date);
@@ -233,6 +251,8 @@ fn apply_crate_changes(
     data_folder: &Path,
     tx: &std::sync::mpsc::SyncSender<Operation>,
     db: &Database,
+    mut index_writer: IndexWriter,
+    index: SearchIndex,
 ) -> anyhow::Result<()> {
     // Gather the keywords and categories for the crates
     println!("Parsing crate keywords.");
@@ -266,13 +286,24 @@ fn apply_crate_changes(
         if let Some(existing) = schema::Crate::get(&id, db)? {
             if existing.contents == cr {
                 continue;
+            } else {
+                index_writer.delete_term(Term::from_field_u64(index.id, id));
             }
         }
+
+        index_writer.add_document(doc! {
+            index.id => id,
+            index.name => cr.name.clone(),
+            index.description => cr.description.clone(),
+            index.readme => cr.readme.clone(),
+        })?;
 
         tx.send(Operation::overwrite_serialized::<schema::Crate, _>(
             &id, &cr,
         )?)?;
     }
+
+    index_writer.commit()?;
 
     Ok(())
 }
